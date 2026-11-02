@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import itertools
+from os import getenv
 from typing import Dict, Optional, Union
 
 import torch
+import torch_npu  # NPU: torch.cuda -> torch_npu.npu
 from commons.datasets.hstu_batch import HSTUBatch
-from commons.ops.cuda_ops.JaggedTensorOpFunction import jagged_2D_tensor_concat
 from commons.ops.length_to_offsets import length_to_complete_offsets
-from commons.ops.triton_ops.triton_jagged import triton_split_2D_jagged
 from commons.utils.nvtx_op import output_nvtx_hook
 from configs.hstu_config import HSTUConfig
 from configs.inference_config import InferenceHSTUConfig
@@ -27,6 +27,18 @@ from modules.jagged_data import JaggedData, pad_jd_values, unpad_jd_values
 from modules.mlp import MLP
 from modules.position_encoder import HSTUPositionalEncoder
 from torchrec.sparse.jagged_tensor import JaggedTensor
+
+# NPU: CUDA 扩展 jagged_2D_tensor_concat / triton_split_2D_jagged -> pt_ops 纯 torch 实现
+# （USE_TRITON=1 且环境可用时保留 triton 路径）
+_USE_TRITON = getenv("USE_TRITON", "0").lower() in ("1", "true")
+if _USE_TRITON:
+    from commons.ops.cuda_ops.JaggedTensorOpFunction import jagged_2D_tensor_concat
+    from commons.ops.triton_ops.triton_jagged import triton_split_2D_jagged
+else:
+    from ops.pt_ops.pt_jagged_tensors import (
+        jagged_2D_tensor_concat,
+        split_2D_jagged as triton_split_2D_jagged,
+    )
 
 try:
     from megatron.core import parallel_state
@@ -209,9 +221,8 @@ def hstu_preprocess_embeddings(
             contextual_sequence_embeddings = contextual_mlp(
                 contextual_sequence_embeddings
             )
-        contextual_seqlen_offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(
-            contextual_seqlen
-        )
+        # NPU: torch.ops.fbgemm.asynchronous_complete_cumsum -> length_to_complete_offsets（含 torch 回退）
+        contextual_seqlen_offsets = length_to_complete_offsets(contextual_seqlen)
         contextual_max_seqlen = max(
             len(batch.contextual_feature_names), sum(contextual_max_seqlens)
         )
@@ -224,8 +235,8 @@ def hstu_preprocess_embeddings(
             [contextual_max_seqlen, sequence_max_seqlen],
         )
 
-        sequence_embeddings_lengths_offsets = (
-            torch.ops.fbgemm.asynchronous_complete_cumsum(sequence_embeddings_lengths)
+        sequence_embeddings_lengths_offsets = length_to_complete_offsets(
+            sequence_embeddings_lengths
         )
         sequence_max_seqlen = sequence_max_seqlen + contextual_max_seqlen
 
@@ -381,7 +392,8 @@ class HSTUBlockPreprocessor(torch.nn.Module):
         Returns:
             JaggedData: The preprocessed jagged data, ready for further processing in the HSTU architecture.
         """
-        device = torch.device("cuda", torch.cuda.current_device())
+        # NPU: torch.device("cuda", ...) -> npu 设备
+        device = torch_npu.npu.current_device()
         batch = batch.to(device)
         # Interleaving & concatenation
         jd = hstu_preprocess_embeddings(

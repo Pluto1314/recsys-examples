@@ -18,9 +18,9 @@ from typing import Dict
 import torch
 from commons.datasets.hstu_batch import HSTUBatch
 from configs import InferenceHSTUConfig, RankingConfig
+from inference.npu.kvcache_compat import KVCacheConfig  # NPU: kvcache 适配层
 from modules.inference_dense_module import InferenceDenseModule
 from modules.inference_embedding import InferenceEmbedding
-from recsys_kvcache_manager.kvcache_config import KVCacheConfig
 from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
 
 
@@ -84,8 +84,6 @@ class InferenceRankingGR(torch.nn.Module):
         self.dense_module.load_state_dict(model_state_dict, strict=False)
 
     def strip_cached_tokens(self, batch, origin_num_cached):
-        torch.cuda.nvtx.range_push("strip_cached_tokens")
-
         num_context = len(batch.contextual_feature_names)
 
         num_cached = torch.clamp_min(origin_num_cached - num_context, 0).to(torch.int32)
@@ -126,12 +124,11 @@ class InferenceRankingGR(torch.nn.Module):
 
         new_features = KeyedJaggedTensor(
             values=torch.cat(new_context_value + new_hist_value, dim=0),
-            lengths=new_lengths.cuda(),
+            lengths=new_lengths.to(batch.features.values().device),
             keys=batch.features.keys(),
         )
         batch.features = new_features
 
-        torch.cuda.nvtx.range_pop()
         return batch
 
     def forward_with_kvcache(
@@ -161,9 +158,7 @@ class InferenceRankingGR(torch.nn.Module):
                 old_cached_lengths,
             )
 
-            torch.cuda.nvtx.range_push("HSTU embedding")
             embeddings = self.sparse_module(striped_batch.features)
-            torch.cuda.nvtx.range_pop()
 
             kvcache_info = (index_meta, lookup_res, kvcache_metadata)
             logits = self.dense_module.forward_with_kvcache(
@@ -181,9 +176,7 @@ class InferenceRankingGR(torch.nn.Module):
         batch: HSTUBatch,
     ):
         with torch.inference_mode():
-            torch.cuda.nvtx.range_push("HSTU embedding")
             embeddings = self.sparse_module(batch.features)
-            torch.cuda.nvtx.range_pop()
             logits = self.dense_module.forward_nokvcache(batch, embeddings)
 
         return logits
@@ -193,9 +186,7 @@ class InferenceRankingGR(torch.nn.Module):
         batch: HSTUBatch,
     ):
         with torch.inference_mode():
-            torch.cuda.nvtx.range_push("HSTU embedding")
             embeddings = self.sparse_module(batch.features)
-            torch.cuda.nvtx.range_pop()
             logits = self.dense_module(batch, embeddings)
         return logits
 

@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch_npu  # NPU: torch.cuda -> torch_npu.npu
 import torchmetrics.classification as classification_metrics
 from commons.ops.collective_ops import grouped_allgatherv_tensor_list
 from commons.utils.nvtx_op import output_nvtx_hook
@@ -265,7 +266,7 @@ class RetrievalTaskMetricWithSampling(BaseTaskMetric):
     ):
         super().__init__()
         self._max_k = MAX_K
-        self._device = torch.device(f"cuda:{torch.cuda.current_device()}")
+        self._device = torch_npu.npu.current_device()  # NPU
         self._mtype_topk = []
         for metric_type in metric_types:
             tmp_str = metric_type.split("@")

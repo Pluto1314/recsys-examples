@@ -12,26 +12,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import paged_kvcache_ops
 import torch
 import torch.nn.functional as F
+import torch_npu  # NPU: torch.cuda -> torch_npu.npu
 from configs import InferenceHSTUConfig
-from hstu import hstu_attn_varlen_func
+from inference.npu.paged_ops_compat import append_kvcache, hstu_attn_varlen_func
 from modules.jagged_data import JaggedData
 from ops.pt_ops.torch_addmm import torch_addmm_silu_fwd
-from ops.triton_ops.triton_addmm import triton_addmm_silu_fwd
-from ops.triton_ops.triton_layer_norm import triton_weighted_layer_norm_fwd
-from ops.triton_ops.triton_norm_mul_dropout import triton_layer_norm_mul_dropout_fwd
 
 from .debug.debug_paged_hstu_layer import dump, dump_paged_hstu_forward_naive
 
 
 def _select_addmm_silu_impl(sm: int):
-    if sm == 8:
-        return triton_addmm_silu_fwd
-    if sm in (9, 10):
-        return torch_addmm_silu_fwd
-    raise ValueError(f"Unsupported SM major version: {sm}")
+    # NPU: 无 triton，强制走 torch addmm 实现
+    return torch_addmm_silu_fwd
 
 
 class PagedHSTUInferLayer(torch.nn.Module):
@@ -80,8 +74,14 @@ class PagedHSTUInferLayer(torch.nn.Module):
             if config.fp16
             else torch.float32
         )
-        device = torch.cuda.current_device()
-        self.num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+        device = torch_npu.npu.current_device()
+        # NPU: torch_npu 提供 get_device_properties().multi_processor_count（取值为
+        # vector_core_num，见 torch_npu/csrc/npu/Module.cpp GetDeviceProperties）。
+        # NPU append kernel 不消费 num_sms（核数由 PlatformAscendCManager::GetCoreNumAiv
+        # 推导），此处对齐上游取真实值，仅作 shim 的 GPU 兼容参数。
+        self.num_sms = torch_npu.npu.get_device_properties(
+            device
+        ).multi_processor_count
 
         # linear_uvqk
         self._linear_uvqk = torch.nn.Linear(
@@ -158,8 +158,8 @@ class PagedHSTUInferLayer(torch.nn.Module):
             requires_grad=False,
         )
 
-        sm = torch.cuda.get_device_properties(0).major
-        self.addmm_silu_impl = _select_addmm_silu_impl(sm)
+        # NPU: 无 SM 架构概念，_select_addmm_silu_impl 内部强制 torch 实现
+        self.addmm_silu_impl = _select_addmm_silu_impl(0)
 
     def uvqk_addmm_impl(self, input_data, num_tokens):
         if num_tokens >= 2048:  # fusion impl
@@ -227,24 +227,14 @@ class PagedHSTUInferLayer(torch.nn.Module):
         return output_data
 
     def norm_mul_impl(self, jagged_attn_output, user, enable_fusion):
-        if enable_fusion:  # fusion impl
-            parallel_input, _, _, _, _, _ = triton_layer_norm_mul_dropout_fwd(
-                x=jagged_attn_output,
-                u=user,
-                weight=self._output_layernorm_weight,
-                bias=self._output_layernorm_bias,
-                eps=self._eps,
-                dropout_ratio=0.0,
-                training=False,
-            )
-        else:  # non fusion impl
-            parallel_input = user * F.layer_norm(
-                jagged_attn_output,
-                normalized_shape=[self._num_heads * self._linear_dim_per_head],
-                weight=self._output_layernorm_weight,
-                bias=self._output_layernorm_bias,
-                eps=self._eps,
-            )
+        # NPU: 无 triton norm_mul_dropout 融合核，统一走 non-fusion torch 实现
+        parallel_input = user * F.layer_norm(
+            jagged_attn_output,
+            normalized_shape=[self._num_heads * self._linear_dim_per_head],
+            weight=self._output_layernorm_weight,
+            bias=self._output_layernorm_bias,
+            eps=self._eps,
+        )
 
         return parallel_input
 
@@ -288,13 +278,13 @@ class PagedHSTUInferLayer(torch.nn.Module):
         if kv_cache_metadata is not None:
             kv_cache_table = kv_cache_metadata.kv_cache_table[self.layer_idx]
             (paged_k_cache, paged_v_cache) = kv_cache_table.unbind(dim=1)
-            paged_kvcache_ops.append_kvcache(
+            append_kvcache(
                 key,
                 value,
                 kv_cache_metadata.batch_indices,
                 kv_cache_metadata.position,
                 jd.num_candidates_offsets[: batch_size + 1],
-                kv_cache_metadata.new_history_nnz_cuda,
+                kv_cache_metadata.new_history_nnz_npu,
                 kv_cache_metadata.new_history_nnz,
                 paged_k_cache,
                 paged_v_cache,
@@ -327,6 +317,7 @@ class PagedHSTUInferLayer(torch.nn.Module):
                 page_offsets=kv_cache_metadata.kv_indptr,
                 page_ids=kv_cache_metadata.kv_indices,
                 last_page_lens=kv_cache_metadata.kv_last_page_len,
+                cu_seqlens_t=jd.num_candidates_offsets[: batch_size + 1],
             )
         else:
             jagged_attn_output = hstu_attn_varlen_func(
@@ -371,8 +362,10 @@ class PagedHSTUInferLayer(torch.nn.Module):
         kv_cache_metadata,
     ) -> JaggedData:
         input_tensor = input_buffer[:num_tokens, ...]
-        normed_input, _, _, _, _ = triton_weighted_layer_norm_fwd(
-            x=input_tensor,
+        # NPU: 无 triton weighted_layer_norm，用 F.layer_norm 等价实现
+        normed_input = F.layer_norm(
+            input_tensor,
+            normalized_shape=[self._embedding_dim],
             weight=self._input_layernorm_weight,
             bias=self._input_layernorm_bias,
             eps=self._eps,
@@ -393,13 +386,13 @@ class PagedHSTUInferLayer(torch.nn.Module):
         if kv_cache_metadata is not None:
             kv_cache_table = kv_cache_metadata.kv_cache_table[self.layer_idx]
             (paged_k_cache, paged_v_cache) = kv_cache_table.unbind(dim=1)
-            paged_kvcache_ops.append_kvcache(
+            append_kvcache(
                 key,
                 value,
                 kv_cache_metadata.batch_indices,
                 kv_cache_metadata.position,
                 jd.num_candidates_offsets[: batch_size + 1],
-                kv_cache_metadata.new_history_nnz_cuda,
+                kv_cache_metadata.new_history_nnz_npu,
                 num_tokens,  # Note: In cudagraph, need to input max{kv_cache_metadata.new_history_nnz}
                 paged_k_cache,
                 paged_v_cache,
@@ -457,6 +450,9 @@ class PagedHSTUInferLayer(torch.nn.Module):
             page_offsets=kv_cache_metadata.kv_indptr if use_kvcache else None,
             page_ids=kv_cache_metadata.kv_indices if use_kvcache else None,
             last_page_lens=kv_cache_metadata.kv_last_page_len if use_kvcache else None,
+            cu_seqlens_t=jd.num_candidates_offsets[: batch_size + 1]
+            if use_kvcache
+            else None,
         )
 
         jagged_attn_output = jagged_attn_output.view(

@@ -20,6 +20,7 @@ import time
 
 import gin
 import torch
+import torch_npu  # NPU: torch.cuda -> torch_npu.npu
 from commons.datasets import get_data_loader
 from commons.datasets.hstu_sequence_dataset import get_dataset
 from commons.datasets.inference_dataset import InferenceDataset
@@ -31,8 +32,8 @@ from configs import (
     RankingConfig,
     get_inference_hstu_config,
 )
+from inference.npu.kvcache_compat import get_kvcache_config  # NPU: kvcache 适配层
 from modules.metrics import get_multi_event_metric_module
-from recsys_kvcache_manager.kvcache_config import get_kvcache_config
 from torchrec.sparse.jagged_tensor import JaggedTensor, KeyedJaggedTensor
 from utils import DatasetArgs, NetworkArgs, RankingArgs
 
@@ -161,8 +162,13 @@ def get_inference_hstu_model(
         contextual_max_seqlen=num_contextual_features,
     )
 
-    sm_major = torch.cuda.get_device_capability()[0]
-    kvcache_page_size = 128 if sm_major >= 10 else 32
+    # NPU: 对齐上游 sm_major>=10 选大页逻辑。torch_npu 的 get_device_capability
+    # 依赖 TORCH_NPU_DEVICE_CAPABILITY 环境变量，未设置时返回 None（见
+    # torch_npu/npu/__init__.py get_device_capability），故带 None 保护回退 32。
+    npu_capability = torch_npu.npu.get_device_capability()
+    kvcache_page_size = (
+        128 if npu_capability is not None and npu_capability[0] >= 10 else 32
+    )
     base_cache_tokens = 10240 * 32
     num_primary_cache_pages = math.ceil(base_cache_tokens / kvcache_page_size)
     kvcache_max_seq_len = (
@@ -187,8 +193,8 @@ def get_inference_hstu_model(
         "max_batch_size": max_batch_size,
         "max_seq_len": kvcache_max_seq_len,
         "dtype": torch.bfloat16,
-        "device": torch.cuda.current_device(),
-        "host_kvstorage_backend": "native",
+        "device": torch_npu.npu.current_device(),
+        "host_kvstorage_backend": "native_host",
         "offload_timeout_ms": 100.0,
         "offload_mode": "lazy",
     }
@@ -411,7 +417,7 @@ def run_ranking_gr_evaluate(
             try:
                 batch = next(dataloader_iter)
 
-                batch = batch.to(device=torch.cuda.current_device())
+                batch = batch.to(device=torch_npu.npu.current_device())
                 d = batch.features.to_dict()
                 user_ids = d["user_id"].values().cpu().long()
                 if user_ids.shape[0] != batch.batch_size:

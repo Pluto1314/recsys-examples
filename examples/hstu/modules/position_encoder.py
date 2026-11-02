@@ -31,6 +31,7 @@
 # pyre-strict
 
 from math import sqrt
+from os import getenv
 from typing import Optional
 
 import torch
@@ -39,11 +40,20 @@ from commons.ops.triton_ops.common import (
     set_use_runtime_max_seq_len,
 )
 from commons.utils.nvtx_op import output_nvtx_hook
-from ops.triton_ops.triton_position import (  # type: ignore[attr-defined]
-    triton_add_position_embeddings,
-    triton_add_timestamp_positional_embeddings,
-)
 from torch.fx._symbolic_trace import is_fx_tracing
+
+# NPU: triton_position -> pt_position 纯 torch 实现（USE_TRITON=1 时保留 triton 路径）
+_USE_TRITON = getenv("USE_TRITON", "0").lower() in ("1", "true")
+if _USE_TRITON:
+    from ops.triton_ops.triton_position import (  # type: ignore[attr-defined]
+        triton_add_position_embeddings,
+        triton_add_timestamp_positional_embeddings,
+    )
+else:
+    from ops.pt_ops.pt_position import (  # type: ignore[attr-defined]
+        add_position_embeddings as triton_add_position_embeddings,
+        add_timestamp_positional_embeddings as triton_add_timestamp_positional_embeddings,
+    )
 
 
 @torch.fx.wrap

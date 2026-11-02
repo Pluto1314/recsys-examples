@@ -15,22 +15,36 @@
 
 import os
 import warnings
+from types import SimpleNamespace
 
 # pyre-strict
 from typing import Dict, List, Optional
 
 import torch
+import torch_npu  # NPU: torch.cuda -> torch_npu.npu
 from configs import EmbeddingBackend, InferenceEmbeddingConfig
-from dynamicemb import (
-    DynamicEmbInitializerArgs,
-    DynamicEmbInitializerMode,
-    DynamicEmbPoolingMode,
-    DynamicEmbTableOptions,
-)
-from dynamicemb.batched_dynamicemb_tables import BatchedDynamicEmbeddingTablesV2
 from torchrec.modules.embedding_configs import EmbeddingConfig, dtype_to_data_type
 from torchrec.modules.embedding_modules import EmbeddingCollection
 from torchrec.sparse.jagged_tensor import JaggedTensor, KeyedJaggedTensor
+
+# NPU: dynamicemb(pip) -> RecSDK dynamic_emb 包，仅 import 路径差异
+# （DynamicEmbPoolingMode 顶层未再导出；V2 表在 distributed.batched_dynamicemb_table）。
+# 包不可得（HSTU_NPU_DRY_RUN=1 干检）时退化为 nn.Embedding 桩，见 create_dynamic_embedding_tables。
+try:
+    from dynamic_emb import (
+        DynamicEmbInitializerArgs,
+        DynamicEmbInitializerMode,
+        DynamicEmbTableOptions,
+    )
+    from dynamic_emb.distributed.batched_dynamicemb_table import (
+        BatchedDynamicEmbeddingTablesV2,
+    )
+    from dynamic_emb.distributed.dynamicemb_config import DynamicEmbPoolingMode
+
+    _HAS_DYNAMIC_EMB = True
+except ImportError:
+    _HAS_DYNAMIC_EMB = False
+    DynamicEmbPoolingMode = None
 
 
 class ParameterServer(torch.nn.Module):
@@ -65,6 +79,10 @@ def create_dynamic_embedding_tables(
     ps: Optional[ParameterServer] = None,
     sparse_shareables=None,
 ):
+    if not _HAS_DYNAMIC_EMB:
+        # NPU 干检退化：nn.Embedding 桩（形状/调用约定对齐，不做真实查表语义）
+        return _DryRunBatchedEmbeddingTables(embedding_configs, output_dtype)
+
     table_options = [
         DynamicEmbTableOptions(
             index_type=torch.int64,
@@ -91,6 +109,27 @@ def create_dynamic_embedding_tables(
     )
 
 
+if not _HAS_DYNAMIC_EMB:
+
+    class _DryRunBatchedEmbeddingTables(torch.nn.Module):
+        """HSTU_NPU_DRY_RUN=1 专用桩：镜像 BatchedDynamicEmbeddingTablesV2 的调用面
+        （forward(indices, offsets)、table_names、load、tables.insert）。"""
+
+        def __init__(self, embedding_configs, output_dtype):
+            super().__init__()
+            self.table_names = [config.table_name for config in embedding_configs]
+            # 干检桩裁剪表容量（id 经 forward 内取模映射，控制内存）
+            max_vocab = min(max(c.vocab_size for c in embedding_configs), 65536)
+            self._embedding = torch.nn.Embedding(max_vocab, embedding_configs[0].dim)
+            self.tables = SimpleNamespace(insert=lambda *args, **kwargs: None)
+
+        def load(self, *args, **kwargs):
+            return None
+
+        def forward(self, indices: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
+            return self._embedding(indices.long() % self._embedding.num_embeddings)
+
+
 class InferenceDynamicEmbeddingCollection(torch.nn.Module):
     def __init__(
         self,
@@ -107,7 +146,7 @@ class InferenceDynamicEmbeddingCollection(torch.nn.Module):
 
         self._cache = (
             create_dynamic_embedding_tables(
-                embedding_configs, device=torch.cuda.current_device()
+                embedding_configs, device=torch_npu.npu.current_device()
             )
             if enable_cache
             else None
@@ -178,7 +217,7 @@ def create_embedding_collection(configs, backend, use_static: bool = False, **kw
                 )
                 for config in configs
             ],
-            device=torch.cuda.current_device(),
+            device=torch_npu.npu.current_device(),
         )
     elif backend == EmbeddingBackend.DYNAMICEMB:
         assert (
@@ -208,7 +247,7 @@ def create_embedding_collection(configs, backend, use_static: bool = False, **kw
                 )
                 for config in configs
             ],
-            device=torch.cuda.current_device(),
+            device=torch_npu.npu.current_device(),
             use_gpu_only=use_static,
             gpu_cache_ratio=kwargs.get("gpu_cache_ratio", 0.1),
             is_weighted=kwargs.get("is_weighted", False),
@@ -268,9 +307,9 @@ class InferenceEmbedding(torch.nn.Module):
             backend=self.static_emb_backend,
             use_static=True,
         )
-        self._side_stream = torch.cuda.Stream()
+        self._side_stream = torch_npu.npu.Stream()
         self._static_embedding_collection = self._static_embedding_collection.to(
-            torch.cuda.current_device()
+            torch_npu.npu.current_device()
         )
 
         features_split_sizes, features_split_indices = self.get_features_splits(
@@ -322,14 +361,14 @@ class InferenceEmbedding(torch.nn.Module):
                         keys = torch.arange(
                             0,
                             emb_table_size,
-                            device=torch.cuda.current_device(),
+                            device=torch_npu.npu.current_device(),
                             dtype=torch.int64,
                         )
                         table_ids = torch.full(
                             (emb_table_size,),
                             table_id,
                             dtype=torch.int64,
-                            device=torch.cuda.current_device(),
+                            device=torch_npu.npu.current_device(),
                         )
                         embeddings = old_emb_table_weights[
                             weight_offset : weight_offset + emb_table_size
@@ -409,9 +448,9 @@ class InferenceEmbedding(torch.nn.Module):
 
         dynamic_embeddings = self._dynamic_embedding_collection(kjt)
         if self._static_embedding_collection is not None:
-            with torch.cuda.stream(self._side_stream):
+            with torch_npu.npu.stream(self._side_stream):
                 static_embeddings = self._static_embedding_collection(kjt)
-            torch.cuda.current_stream().wait_stream(self._side_stream)
+            torch_npu.npu.current_stream().wait_stream(self._side_stream)
             embeddings = {**dynamic_embeddings, **static_embeddings}
         else:
             embeddings = dynamic_embeddings

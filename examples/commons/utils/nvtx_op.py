@@ -18,7 +18,28 @@ from functools import partial, wraps
 
 import torch
 
+# NPU: 无 CUDA NVTX 时 range_push/pop 退化为 no-op（单点收敛，免改各调用方）。
+# 注意 CPU-only torch 上属性可访问但调用会抛错，故以 is_available 判定。
+if torch.cuda.is_available() and hasattr(torch.cuda, "nvtx"):
+    _range_push = torch.cuda.nvtx.range_push
+    _range_pop = torch.cuda.nvtx.range_pop
+else:
+    _range_push = lambda *args, **kwargs: None  # noqa: E731
+    _range_pop = lambda *args, **kwargs: None  # noqa: E731
+
 _NVTX_HOOKS_ENABLED = os.environ.get("ENABLE_NVTX_HOOKS", "1") == "1"
+
+
+def _hook_placeholder_device():
+    # NPU: 占位张量设备按 npu/cuda/cpu 可达性选择（torch_npu 存在且可用则 npu）
+    try:
+        import torch_npu  # noqa: F401
+
+        if torch_npu.npu.is_available():
+            return "npu"
+    except ImportError:
+        pass
+    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def set_nvtx_hooks_enabled(enabled: bool) -> None:
@@ -33,22 +54,22 @@ def nvtx_hooks_enabled() -> bool:
 
 def forward_nvtx_push_hook(module, input, msg=""):
     if _NVTX_HOOKS_ENABLED:
-        torch.cuda.nvtx.range_push(msg)
+        _range_push(msg)
 
 
 def forward_nvtx_pop_hook(module, input, output):
     if _NVTX_HOOKS_ENABLED:
-        torch.cuda.nvtx.range_pop()
+        _range_pop()
 
 
 def backward_nvtx_push_hook(module, grad_output, msg=""):
     if _NVTX_HOOKS_ENABLED:
-        torch.cuda.nvtx.range_push(msg)
+        _range_push(msg)
 
 
 def backward_nvtx_pop_hook(module, grad_input, grad_output):
     if _NVTX_HOOKS_ENABLED:
-        torch.cuda.nvtx.range_pop()
+        _range_pop()
 
 
 def register_nvtx_for_module(module: torch.nn.Module, msg=""):
@@ -129,12 +150,12 @@ class _NvtxRangePush(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, msg="None"):
         ctx.msg = msg
-        torch.cuda.nvtx.range_push(msg)
+        _range_push(msg)
         return input
 
     @staticmethod
     def backward(ctx, grad_in):
-        torch.cuda.nvtx.range_pop()
+        _range_pop()
         return grad_in, None
 
 
@@ -142,13 +163,13 @@ class _NvtxRangePop(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, msg="None"):
         ctx.msg = msg
-        torch.cuda.nvtx.range_pop()
+        _range_pop()
         return input
 
     @staticmethod
     def backward(ctx, grad_in):
         msg = ctx.msg
-        torch.cuda.nvtx.range_push(msg)
+        _range_push(msg)
         return grad_in, None
 
 
@@ -178,9 +199,9 @@ def output_nvtx_hook(nvtx_tag, backward=True, hook_key_or_attr_name="data"):
         def forward(*args, **kwags):
             if not _NVTX_HOOKS_ENABLED:
                 return module(*args, **kwags)
-            torch.cuda.nvtx.range_push(nvtx_tag)
+            _range_push(nvtx_tag)
             output = module(*args, **kwags)
-            torch.cuda.nvtx.range_pop()
+            _range_pop()
             return output
 
         return forward
@@ -190,7 +211,10 @@ def output_nvtx_hook(nvtx_tag, backward=True, hook_key_or_attr_name="data"):
         def wrapper(*args, **kwargs):
             if not _NVTX_HOOKS_ENABLED:
                 return module_or_func(*args, **kwargs)
-            _placeholder = torch.empty(1, device="cuda").requires_grad_()
+            # NPU: 占位张量按 npu/cuda/cpu 可达性选设备（数值上恒等，不参与计算）
+            _placeholder = torch.empty(
+                1, device=_hook_placeholder_device()
+            ).requires_grad_()
             hook_r = NvtxRangePush(_placeholder, nvtx_tag + " forward")
             output = module_or_func(*args, **kwargs)
 

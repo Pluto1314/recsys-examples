@@ -34,6 +34,7 @@ from typing import Dict, Iterator, List, Optional
 import numpy as np
 import pandas as pd
 import torch
+import torch_npu  # NPU: torch.cuda -> torch_npu.npu
 from commons.datasets.hstu_batch import HSTUBatch
 from torch.utils.data.dataset import IterableDataset
 from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
@@ -99,7 +100,7 @@ class InferenceDataset(IterableDataset[HSTUBatch]):
         batch_nrows: Optional[int] = None,
     ) -> None:
         super().__init__()
-        self._device = torch.cuda.current_device()
+        self._device = torch_npu.npu.current_device()  # NPU
 
         if seq_nrows is None or batch_nrows is None:
             self._seq_logs_frame = pd.read_csv(seq_logs_file, delimiter=",")

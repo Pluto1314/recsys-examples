@@ -17,22 +17,24 @@ import os
 from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
+import torch_npu  # NPU: torch.cuda -> torch_npu.npu
 from commons.datasets.hstu_batch import HSTUBatch
 from commons.ops.triton_ops.common import (
     set_static_max_seq_lens,
     set_use_runtime_max_seq_len,
 )
 from configs import HSTUConfig, InferenceHSTUConfig, RankingConfig
-from modules.hstu_block_inference import HSTUBlockInference
-from recsys_kvcache_manager.host_kvstorage_manager import HostKVTaskStatus
-from recsys_kvcache_manager.kvcache_config import KVCacheConfig
-from recsys_kvcache_manager.kvcache_manager import KVCacheManager
-from recsys_kvcache_manager.kvcache_metadata import (
+from inference.npu.kvcache_compat import (  # NPU: recsys_kvcache_manager -> _npu 适配层
+    HostKVTaskStatus,
+    KVCacheConfig,
+    KVCacheManager,
     KVCacheMetadata,
+    KVIndexMeta,
+    KVLookupResult,
     copy_kvcache_metadata,
     get_kvcache_metadata_buffer,
 )
-from recsys_kvcache_manager.kvcache_utils import KVIndexMeta, KVLookupResult
+from modules.hstu_block_inference import HSTUBlockInference
 
 if int(os.getenv("HSTU_INFERENCE_ONLY", 0)) != 1:
     from modules.hstu_block import HSTUBlock
@@ -48,7 +50,7 @@ from torchrec.sparse.jagged_tensor import JaggedTensor
 
 def get_jagged_metadata_buffer(max_batch_size, max_seq_len, contextual_max_seqlen):
     int_dtype = torch.int32
-    device = torch.cuda.current_device()
+    device = torch_npu.npu.current_device()
     default_num_candidates = max_seq_len // 2
     return JaggedData(
         values=None,
@@ -136,7 +138,7 @@ class InferenceDenseModule(torch.nn.Module):
         mlp: Optional[torch.nn.Module] = None,
     ):
         super().__init__()
-        self._device = torch.cuda.current_device()
+        self._device = torch_npu.npu.current_device()
         self._hstu_config = hstu_config
         self._task_config = task_config
         self._use_exportable = use_exportable
@@ -172,8 +174,9 @@ class InferenceDenseModule(torch.nn.Module):
             else mlp
         )
 
-        self._hstu_block = self._hstu_block.cuda()
-        self._mlp = self._mlp.cuda()
+        # NPU: .cuda() -> .npu()
+        self._hstu_block = self._hstu_block.npu()
+        self._mlp = self._mlp.npu()
 
         self._dtype = (
             torch.bfloat16
@@ -235,10 +238,11 @@ class InferenceDenseModule(torch.nn.Module):
                     batch_size=max_batch_size,
                     num_new_tokens=max_num_tokens,
                     num_pages=int(max_num_pages),
-                    device=torch.cuda.current_device(),
+                    device=torch_npu.npu.current_device(),
                 )
+                # NPU: .gpu_kvcache_mgr.gpu_kvcache_tables -> .npu_kvcache_mgr.npu_kvcache_tables
                 self._kvcache_metadata.kv_cache_table = [
-                    self.kvcache.gpu_kvcache_mgr.gpu_kvcache_tables[idx]
+                    self.kvcache.npu_kvcache_mgr.npu_kvcache_tables[idx]
                     for idx in range(hstu_config.num_layers)
                 ]
                 self._kvcache_metadata.kv_onload_handle = None
@@ -347,7 +351,7 @@ class InferenceDenseModule(torch.nn.Module):
             jagged_data = self._hstu_block._preprocessor(
                 embeddings=embeddings,
                 batch=batch,
-                seq_start_position=kv_lookup_result.cached_lengths.cuda(),
+                seq_start_position=kv_lookup_result.cached_lengths.to(self._device),
             )
             jagged_data.scaling_seqlen = self._scaling_seqlen
 
@@ -368,11 +372,11 @@ class InferenceDenseModule(torch.nn.Module):
                 and onboard_handle.status != HostKVTaskStatus.SKIPPED
                 and onboard_handle.backend == "flexkv"
             ):
-                torch.cuda.nvtx.range_push("recsys.kvcache.onboard_wait")
+                # NPU: native_host 无 flexkv，此 batch 级 onboard_wait 分支不可达，保留原样
                 try:
                     self.kvcache.onboard_wait(kv_index_meta, onboard_handle)
                 finally:
-                    torch.cuda.nvtx.range_pop()
+                    pass
 
             num_tokens = batch.features.values().shape[0]
             if self.use_cudagraph:
