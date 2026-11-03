@@ -21,7 +21,11 @@ from typing import Any, List
 
 import torch
 import torch.nn as nn
-from dynamicemb.dump_load import get_dynamic_emb_module
+# NPU: dynamicemb(pip) -> RecSDK dynamic_emb（get_dynamic_emb_module 在 distributed.dump_load）
+try:
+    from dynamic_emb.distributed.dump_load import get_dynamic_emb_module
+except ImportError:
+    from dynamicemb.dump_load import get_dynamic_emb_module
 
 
 class _CacheDebugHook:

@@ -14,7 +14,11 @@
 # limitations under the License.
 from typing import List, Tuple
 
-import fbgemm_gpu  # to load permute_2D_sparse_data
+try:
+    import fbgemm_gpu  # to load permute_2D_sparse_data
+except ImportError:  # NPU: torch.ops.fbgemm 由 fbgemm_ascend 注册
+    pass
+
 import torch
 from torchrec.sparse.jagged_tensor import JaggedTensor
 

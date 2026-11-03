@@ -32,7 +32,11 @@
 
 from typing import Optional, Tuple, Union
 
-import fbgemm_gpu  # pylint: disable-unused-import
+try:
+    import fbgemm_gpu  # pylint: disable-unused-import
+except ImportError:  # NPU: torch.ops.fbgemm 由 fbgemm_ascend 注册
+    pass
+
 import torch
 import torch.nn.functional as F
 

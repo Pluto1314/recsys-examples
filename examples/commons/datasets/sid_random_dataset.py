@@ -15,7 +15,11 @@
 import sys
 from typing import Iterator, List, Optional, cast
 
-import fbgemm_gpu  # pylint: disable-unused-import
+try:
+    import fbgemm_gpu  # pylint: disable-unused-import
+except ImportError:  # NPU: torch.ops.fbgemm 由 fbgemm_ascend 注册
+    pass
+
 import torch
 from commons.datasets.gpt_sid_batch import FeatureConfig, GPTSIDBatch
 from torch.utils.data.dataset import IterableDataset
