@@ -51,6 +51,14 @@ class ParameterServer(torch.nn.Module):
     pass
 
 
+def _npu_device():
+    """NPU 设备对象：构造器入参统一用 torch.device（torchrec npu safe_checker
+    拒绝 int）。current_device() 真 torch_npu 返回 int，干检桩可能返回 device，
+    两种都归一化。"""
+    dev = torch_npu.npu.current_device()
+    return dev if isinstance(dev, torch.device) else torch.device("npu", dev)
+
+
 class DummyParameterServer(ParameterServer):
     def __init__(self, embedding_configs):
         super().__init__()
@@ -109,7 +117,7 @@ def create_dynamic_embedding_tables(
         table_names=table_names,
         pooling_mode=DynamicEmbPoolingMode.NONE,
         output_dtype=output_dtype,
-        device=torch.device("npu", torch_npu.npu.current_device()),
+        device=_npu_device(),
     )
 
 
@@ -225,7 +233,7 @@ def create_embedding_collection(configs, backend, use_static: bool = False, **kw
             ],
             # NPU: torchrec 1.5.0+npu 的 safe_checker 要求 device 为 torch.device
             # （上游接受 int），构造器入参须用 torch.device 而非 current_device() 的 int
-            device=torch.device("npu", torch_npu.npu.current_device()),
+            device=_npu_device(),
         )
     elif backend == EmbeddingBackend.DYNAMICEMB:
         assert (
@@ -256,7 +264,7 @@ def create_embedding_collection(configs, backend, use_static: bool = False, **kw
                 for config in configs
             ],
             # NPU: 同上，构造器入参须用 torch.device
-            device=torch.device("npu", torch_npu.npu.current_device()),
+            device=_npu_device(),
             use_gpu_only=use_static,
             gpu_cache_ratio=kwargs.get("gpu_cache_ratio", 0.1),
             is_weighted=kwargs.get("is_weighted", False),
