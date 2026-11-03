@@ -9,6 +9,9 @@ import argparse
 from typing import Any, Mapping
 
 from tool_utils import bootstrap_repo_paths
+from tool_utils import (  # noqa: E402
+    device_synchronize_fn as _device_synchronize_fn,
+)
 
 bootstrap_repo_paths(__file__, include_tools=True)
 
@@ -95,7 +98,7 @@ def build_http_serving_adapter(args) -> GRHTTPServingAdapter:
     executor = GRContinuousServingExecutor(
         engine=engine,
         scheduler=scheduler,
-        synchronize=torch.cuda.synchronize if device == "cuda" else None,
+        synchronize=_device_synchronize_fn(torch, device),  # NPU: cuda/npu 统一同步（cpu 为 None）
         sync_timing=args.executor_sync_timing,
         timing_recorder=recorder,
         beam_kv_pool=beam_kv_pool,
@@ -219,7 +222,7 @@ def _warmup_online_shapes(
                 max_finished_requests=args.max_batch_size * args.max_batch_size,
             )
         ),
-        synchronize=torch.cuda.synchronize if device == "cuda" else None,
+        synchronize=_device_synchronize_fn(torch, device),  # NPU: cuda/npu 统一同步（cpu 为 None）
         sync_timing=args.executor_sync_timing,
         beam_kv_pool=beam_kv_pool,
         context_kv_pool=context_kv_pool,
@@ -306,8 +309,10 @@ def _warmup_online_shapes(
                 )
             )
         executor.run_until_empty(max_ticks=args.decode_steps + 2)
-    if device == "cuda":
-        torch.cuda.synchronize()
+    # NPU: cuda/npu 同步统一走 device_synchronize_fn（cpu 为 no-op）
+    _synchronize = _device_synchronize_fn(torch, device)
+    if _synchronize is not None:
+        _synchronize()
 
 
 def _warmup_online_logits_processors(args) -> tuple[Any, ...]:

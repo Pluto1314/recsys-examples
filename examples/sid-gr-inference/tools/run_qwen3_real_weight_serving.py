@@ -69,6 +69,8 @@ from gr_inference.gr_serving.cli import parse_unique_int_list  # noqa: E402
 from tool_utils import iter_jsonl
 from tool_utils import numeric_median as _median  # noqa: E402
 from tool_utils import write_json
+from tool_utils import device_synchronize_fn as _device_synchronize_fn  # noqa: E402
+from tool_utils import resolve_torch_device  # noqa: E402
 
 try:  # noqa: E402
     from gr_inference_trtllm_kernels import call_counts as gr_trtllm_call_counts
@@ -85,7 +87,8 @@ except Exception:  # pragma: no cover - optional kernel package
 
 
 def choose_dtype(torch, device: str):
-    return torch.bfloat16 if device == "cuda" else torch.float32
+    # NPU: 950PR 支持 bf16，与 cuda 同待遇
+    return torch.bfloat16 if device in {"cuda", "npu"} else torch.float32
 
 
 def load_model(args, torch):
@@ -103,12 +106,8 @@ def load_model(args, torch):
         max_decode_steps=max(args.decode_steps, 1),
         max_beam_width=args.beam_width,
     )
-    device = (
-        "cuda"
-        if args.device == "cuda"
-        or (args.device == "auto" and torch.cuda.is_available())
-        else "cpu"
-    )
+    # NPU: auto 探测顺序 cuda -> npu -> cpu（torch_npu 惰性导入）
+    device = resolve_torch_device(torch, args.device)
     dtype = choose_dtype(torch, device)
 
     print("Materializing checkpoint logical tensors...")
@@ -142,8 +141,10 @@ def _make_prefill_backend():
 def make_decode_backend(args, device: str):
     if args.decode_backend == "fake":
         return lambda inputs: inputs.q
-    if device != "cuda":
-        raise RuntimeError("--decode-backend real requires CUDA")
+    # NPU: real decode 走 ExistingGRDecodeAttentionBackend，locator 在 NPU 上
+    # 自动落到 third_party/gr-decode-attention-npu 的 python stub
+    if device not in {"cuda", "npu"}:
+        raise RuntimeError("--decode-backend real requires CUDA or NPU")
     if not args.batched_decode:
         raise RuntimeError("--decode-backend real currently requires --batched-decode")
     return ExistingGRDecodeAttentionBackend()
@@ -375,12 +376,14 @@ def _run_scheduler_once(
                     request_id=f"{request_prefix}-{idx}",
                 )
             )
-        if device == "cuda":
-            torch.cuda.synchronize()
+        # NPU: cuda/npu 同步统一走 device_synchronize_fn（cpu 为 no-op）
+        _synchronize = _device_synchronize_fn(torch, device)
+        if _synchronize is not None:
+            _synchronize()
         start = time.perf_counter()
         responses = scheduler.run_until_empty()
-        if device == "cuda":
-            torch.cuda.synchronize()
+        if _synchronize is not None:
+            _synchronize()
         wall_ms = (time.perf_counter() - start) * 1000.0
 
     return _run_result(
@@ -430,7 +433,8 @@ def _run_continuous_once(
     executor = GRContinuousServingExecutor(
         engine=engine,
         scheduler=scheduler,
-        synchronize=torch.cuda.synchronize if device == "cuda" else None,
+        # NPU: cuda/npu 同步统一走 device_synchronize_fn（cpu 为 None）
+        synchronize=_device_synchronize_fn(torch, device),
         sync_timing=args.executor_sync_timing,
         timing_recorder=recorder,
         beam_kv_pool=beam_kv_pool,
@@ -471,8 +475,10 @@ def _run_continuous_once(
                         request_id=f"{request_prefix}-{idx}",
                     )
                 )
-        if device == "cuda":
-            torch.cuda.synchronize()
+        # NPU: cuda/npu 同步统一走 device_synchronize_fn（cpu 为 no-op）
+        _synchronize = _device_synchronize_fn(torch, device)
+        if _synchronize is not None:
+            _synchronize()
         start = time.perf_counter()
         if arrival_stagger_ticks > 0:
             current_tick = 0
@@ -497,8 +503,8 @@ def _run_continuous_once(
             responses = tuple(executor.scheduler.finished.values())
         else:
             responses = executor.run_until_empty()
-        if device == "cuda":
-            torch.cuda.synchronize()
+        if _synchronize is not None:
+            _synchronize()
         wall_ms = (time.perf_counter() - start) * 1000.0
 
     scheduler_metrics = dict(executor.metrics())
@@ -966,7 +972,9 @@ def main() -> None:
         help="With staggered arrivals, submit this many requests per arrival tick",
     )
     parser.add_argument("--decode-backend", choices=["fake", "real"], default="fake")
-    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument(
+        "--device", choices=["auto", "cpu", "cuda", "npu"], default="auto"
+    )
     parser.add_argument("--warmup-runs", type=int, default=0)
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument(

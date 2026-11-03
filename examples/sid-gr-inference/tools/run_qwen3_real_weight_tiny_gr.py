@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 
-from tool_utils import bootstrap_repo_paths
+from tool_utils import bootstrap_repo_paths, resolve_torch_device
 
 bootstrap_repo_paths(__file__)
 
@@ -31,7 +31,8 @@ from gr_inference.gr_models.qwen3 import (  # noqa: E402
 
 
 def choose_dtype(torch, device: str):
-    return torch.bfloat16 if device == "cuda" else torch.float32
+    # NPU: 950PR 支持 bf16，与 cuda 同待遇
+    return torch.bfloat16 if device in {"cuda", "npu"} else torch.float32
 
 
 def build_identity_topk_indices(
@@ -64,12 +65,8 @@ def load_model(args, torch):
         max_decode_steps=max(args.decode_steps, 1),
         max_beam_width=args.beam_width,
     )
-    device = (
-        "cuda"
-        if args.device == "cuda"
-        or (args.device == "auto" and torch.cuda.is_available())
-        else "cpu"
-    )
+    # NPU: auto 探测顺序 cuda -> npu -> cpu（torch_npu 惰性导入）
+    device = resolve_torch_device(torch, args.device)
     dtype = choose_dtype(torch, device)
 
     print("Materializing checkpoint logical tensors...")
@@ -118,8 +115,10 @@ def run_fake_decode(args, torch, model, config, device):
 
 
 def run_real_decode(args, torch, model, config, device):
-    if device != "cuda":
-        raise RuntimeError("--decode-backend real requires CUDA")
+    # NPU: real decode 走 ExistingGRDecodeAttentionBackend，locator 在 NPU 上
+    # 自动落到 third_party/gr-decode-attention-npu 的 python stub
+    if device not in {"cuda", "npu"}:
+        raise RuntimeError("--decode-backend real requires CUDA or NPU")
     if args.decode_steps != 1:
         raise RuntimeError("--decode-backend real currently supports --decode-steps 1")
 
@@ -195,7 +194,7 @@ def main() -> None:
     parser.add_argument("--beam-width", type=int, default=8)
     parser.add_argument("--decode-backend", choices=["fake", "real"], default="fake")
     parser.add_argument("--kernel-backend", choices=["dsl", "3kernel"], default="dsl")
-    parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda", "npu"], default="auto")
     args = parser.parse_args()
 
     import torch

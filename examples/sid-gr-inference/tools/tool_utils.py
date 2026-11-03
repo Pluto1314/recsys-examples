@@ -66,6 +66,37 @@ def json_dumps(value: Any) -> str:
     return json.dumps(jsonable(value), indent=2, sort_keys=True)
 
 
+# NPU: 设备解析/同步统一入口，供 tools 共用。torch_npu 一律惰性导入，
+# CPU/CUDA 路径不引入 torch_npu 依赖（Windows 无卡干检可用）。
+def resolve_torch_device(torch, requested: str) -> str:
+    """Resolve ``--device``: explicit cuda/npu passes through, auto probes cuda -> npu -> cpu."""
+    if requested == "cuda":
+        return "cuda"
+    if requested == "npu":
+        return "npu"
+    if requested == "auto":
+        if torch.cuda.is_available():
+            return "cuda"
+        try:
+            import torch_npu  # NPU: 惰性导入
+        except ImportError:
+            torch_npu = None
+        if torch_npu is not None and torch_npu.npu.is_available():
+            return "npu"
+    return "cpu"
+
+
+def device_synchronize_fn(torch, device: str):
+    """Return the synchronize callable for ``device`` (None on cpu)."""
+    if device == "cuda":
+        return torch.cuda.synchronize
+    if device == "npu":
+        import torch_npu  # NPU: 惰性导入
+
+        return torch_npu.npu.synchronize
+    return None
+
+
 def write_json(path: Path | str, value: Any, *, trailing_newline: bool = True) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

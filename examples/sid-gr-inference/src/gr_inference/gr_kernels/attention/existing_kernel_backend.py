@@ -18,6 +18,10 @@ from gr_inference.gr_kernels.attention.gr_decode_attention import (
 
 DEFAULT_KERNEL_ROOTS = (
     Path(__file__).resolve().parents[4] / "third_party/gr-decode-attention",
+    # NPU: python 等价实现兜底 root（优先级最低）。CUDA 环境若 vendor 了原生
+    # CuTe DSL kernel（上一个 root）则先命中，GPU 行为不变；NPU/CPU 环境无
+    # 原生 kernel 时无需设置 GR_DECODE_ATTEN_ROOT 即可发现 stub。
+    Path(__file__).resolve().parents[4] / "third_party/gr-decode-attention-npu",
 )
 
 
