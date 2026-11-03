@@ -27,19 +27,15 @@ import torchmetrics.classification as classification_metrics
 from commons.ops.collective_ops import grouped_allgatherv_tensor_list
 from commons.utils.nvtx_op import output_nvtx_hook
 # NPU: dynamicemb(pip) -> RecSDK dynamic_emb（顶层同名导出；本文件仅再导出、无直接使用）。
-# 三级回退：dynamic_emb -> dynamicemb -> None（两侧皆不可用时不阻塞推理 import 链；
-# 真实使用方仅训练侧，届时 None 会显式报错）。
+# 包不可得时回退原路径，保持 GPU 行为不变。
 try:
     from dynamic_emb import (
         DynamicEmbeddingShardingPlanner as DynamicEmbeddingShardingPlanner,
     )
 except ImportError:
-    try:
-        from dynamicemb.planner import (
-            DynamicEmbeddingShardingPlanner as DynamicEmbeddingShardingPlanner,
-        )
-    except ImportError:
-        DynamicEmbeddingShardingPlanner = None
+    from dynamicemb.planner import (
+        DynamicEmbeddingShardingPlanner as DynamicEmbeddingShardingPlanner,
+    )
 
 try:
     from megatron.core import parallel_state
