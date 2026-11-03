@@ -451,7 +451,12 @@ def run_ranking_gr_evaluate(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Inference End-to-end Example")
     parser.add_argument("--gin_config_file", type=str, required=True)
-    parser.add_argument("--checkpoint_dir", type=str, required=True)
+    # NPU: checkpoint_dir 可省略——四级 load_checkpoint 均已容忍 None（model/
+    # inference_ranking_gr.py:74、modules/inference_embedding.py:343、modules/
+    # inference_dense_module.py:289），dynamic 表 lookup 时自初始化，权重保持
+    # random init；用于无训练 checkpoint 的 R3a 随机权重结构评估。提供路径时
+    # 加载行为不变。
+    parser.add_argument("--checkpoint_dir", type=str, default=None)
     parser.add_argument(
         "--mode", type=RunningMode, choices=list(RunningMode), required=True
     )
@@ -462,6 +467,15 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     gin.parse_config_file(args.gin_config_file)
+
+    # NPU: 无 checkpoint 时各级 load_checkpoint(None) 均为 no-op，模型为随机
+    # 权重（R3a 结构评估：跑通 data loading/batching/metrics/kvcache 全链路），
+    # 预期 AUC ≈ 0.5。
+    if args.checkpoint_dir is None:
+        print(
+            "NPU: --checkpoint_dir omitted -> random-weight run "
+            "(structural eval; expect AUC ~ 0.5)."
+        )
 
     if args.mode == RunningMode.EVAL:
         if args.disable_auc:
