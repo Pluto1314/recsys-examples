@@ -24,9 +24,16 @@ import torch
 import torch.fx
 import torch.nn as nn
 from commons.utils.nvtx_op import output_nvtx_hook, register_setter_and_getter_for_nvtx
-from dynamicemb.planner import (
-    DynamicEmbeddingShardingPlanner as DynamicEmbeddingShardingPlanner,
-)
+# NPU: dynamicemb(pip) -> RecSDK dynamic_emb（顶层同名导出；本文件仅再导出）。
+# 包不可得时回退原路径，保持 GPU 行为不变。
+try:
+    from dynamic_emb import (
+        DynamicEmbeddingShardingPlanner as DynamicEmbeddingShardingPlanner,
+    )
+except ImportError:
+    from dynamicemb.planner import (
+        DynamicEmbeddingShardingPlanner as DynamicEmbeddingShardingPlanner,
+    )
 from torchrec.distributed.embedding_sharding import EmbeddingShardingInfo
 from torchrec.distributed.embedding_types import EmbeddingComputeKernel
 from torchrec.distributed.sharding.dp_sequence_sharding import (
