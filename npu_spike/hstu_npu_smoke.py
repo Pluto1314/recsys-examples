@@ -60,11 +60,13 @@ def setup_repo(repo):
     hstu = os.path.join(repo, "examples", "hstu")
     if not os.path.isdir(hstu):
         raise SystemExit(f"not a recsys-examples checkout: {repo}")
+    # resolve to absolute BEFORE chdir: relative sys.path entries would break
+    hstu = os.path.abspath(hstu)
+    paths = [hstu, os.path.abspath(os.path.join(repo, "examples")),
+             os.path.join(hstu, "inference"), os.path.join(hstu, "model")]
     os.environ["HSTU_INFERENCE_ONLY"] = "1"  # skip training-only imports
     os.chdir(hstu)  # mirror the real run (entry appends "./model/" to sys.path)
-    for p in reversed([hstu, os.path.join(repo, "examples"),
-                       os.path.join(hstu, "inference"),
-                       os.path.join(hstu, "model")]):
+    for p in reversed(paths):
         if p not in sys.path:  # final order: hstu, examples, inference, model
             sys.path.insert(0, p)
 
@@ -294,9 +296,11 @@ def run_check_d(dtype, atol, rtol):
     import gin
     import torch
     import torch_npu
-    gin.parse_config(GIN_CONFIG)
+    # import the entry module FIRST: its top-level imports (utils/configs) register
+    # the gin configurables (DatasetArgs etc.) that parse_config binds against
     from inference_gr_ranking import get_inference_dataset_and_embedding_configs
     import modules.inference_embedding as inference_embedding
+    gin.parse_config(GIN_CONFIG)
 
     log("[D] embedding backend: " + ("real dynamic_emb"
         if inference_embedding._HAS_DYNAMIC_EMB else "nn.Embedding fallback"))
