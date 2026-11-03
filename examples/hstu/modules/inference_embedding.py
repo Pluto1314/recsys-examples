@@ -101,11 +101,15 @@ def create_dynamic_embedding_tables(
 
     table_names = [config.table_name for config in embedding_configs]
 
+    # NPU: dynamic_emb 25.9 的 V2 构造器在 device=None 时会先解引用 device.type
+    # （None 判定误写在其内层，见 batched_dynamicemb_table.py:549-556），必须显式
+    # 传 torch.device("npu", id)；包内以 int(str(device)[-1]) 解析设备号，本格式兼容。
     return BatchedDynamicEmbeddingTablesV2(
         table_options=table_options,
         table_names=table_names,
         pooling_mode=DynamicEmbPoolingMode.NONE,
         output_dtype=output_dtype,
+        device=torch.device("npu", torch_npu.npu.current_device()),
     )
 
 
@@ -146,7 +150,9 @@ class InferenceDynamicEmbeddingCollection(torch.nn.Module):
 
         self._cache = (
             create_dynamic_embedding_tables(
-                embedding_configs, device=torch_npu.npu.current_device()
+                # NPU: V2 构造器需 torch.device（int 无 .type，同上缺陷），显式传 npu 设备
+                embedding_configs,
+                device=torch.device("npu", torch_npu.npu.current_device()),
             )
             if enable_cache
             else None
