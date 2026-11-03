@@ -20,28 +20,17 @@ import logging
 import os
 
 import torch
-# NPU/无 rich 环境：rich 仅做控制台美化，缺失（或 DISABLE_RICH=1，文件头已声明该开关）
-# 时退回普通 StreamHandler，保证 import 链可用
-try:
-    if os.environ.get("DISABLE_RICH", "0") == "1":
-        raise ImportError("DISABLE_RICH=1")
-    from rich.console import Console
-    from rich.logging import RichHandler
-except ImportError:
-    Console = RichHandler = None
-    console = None
-    handler = logging.StreamHandler()
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-    )
-else:
-    console = Console(soft_wrap=True, width=240)
-    handler = RichHandler(
-        console=console, show_time=True, show_path=False, rich_tracebacks=True
-    )
+from rich.console import Console
+from rich.logging import RichHandler
 
 # Set up logger with RichHandler if not already configured
+
+console = Console(soft_wrap=True, width=240)
 _logger = logging.getLogger("rich_rank0")
+
+handler = RichHandler(
+    console=console, show_time=True, show_path=False, rich_tracebacks=True
+)
 _logger.addHandler(handler)
 _logger.propagate = False
 _logger.setLevel(
