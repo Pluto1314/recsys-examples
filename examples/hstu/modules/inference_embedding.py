@@ -223,7 +223,9 @@ def create_embedding_collection(configs, backend, use_static: bool = False, **kw
                 )
                 for config in configs
             ],
-            device=torch_npu.npu.current_device(),
+            # NPU: torchrec 1.5.0+npu 的 safe_checker 要求 device 为 torch.device
+            # （上游接受 int），构造器入参须用 torch.device 而非 current_device() 的 int
+            device=torch.device("npu", torch_npu.npu.current_device()),
         )
     elif backend == EmbeddingBackend.DYNAMICEMB:
         assert (
@@ -253,7 +255,8 @@ def create_embedding_collection(configs, backend, use_static: bool = False, **kw
                 )
                 for config in configs
             ],
-            device=torch_npu.npu.current_device(),
+            # NPU: 同上，构造器入参须用 torch.device
+            device=torch.device("npu", torch_npu.npu.current_device()),
             use_gpu_only=use_static,
             gpu_cache_ratio=kwargs.get("gpu_cache_ratio", 0.1),
             is_weighted=kwargs.get("is_weighted", False),
