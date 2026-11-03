@@ -205,7 +205,11 @@ class InferenceDynamicEmbeddingCollection(torch.nn.Module):
                 features = KeyedJaggedTensor.concat(
                     [features_split[idx] for idx in self._features_split_indices]
                 )
-            embeddings = self._embedding_tables(features.values(), features.offsets())
+            # NPU: dynamic_emb V2 前向要求 offsets 与其内部 feature_offsets（固定
+            # int64 构造）同 dtype；KJT int32 lengths -> int32 offsets 需 cast
+            embeddings = self._embedding_tables(
+                features.values(), features.offsets().to(torch.int64)
+            )
         embeddings_kjt = KeyedJaggedTensor(
             values=embeddings,
             keys=features.keys(),
