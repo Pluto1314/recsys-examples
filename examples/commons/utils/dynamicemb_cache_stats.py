@@ -21,11 +21,16 @@ from typing import Any, List
 
 import torch
 import torch.nn as nn
-# NPU: dynamicemb(pip) -> RecSDK dynamic_emb（get_dynamic_emb_module 在 distributed.dump_load）
+# NPU: dynamicemb(pip) -> RecSDK dynamic_emb（get_dynamic_emb_module 在 distributed.dump_load）。
+# 两者皆不可用时（含 dynamic_emb 扩展与 torch 版本 ABI 不匹配的 ImportError）置 None：
+# 本模块是可选调试统计（_CacheDebugHook，默认不启用），不应阻塞推理 import 链。
 try:
     from dynamic_emb.distributed.dump_load import get_dynamic_emb_module
 except ImportError:
-    from dynamicemb.dump_load import get_dynamic_emb_module
+    try:
+        from dynamicemb.dump_load import get_dynamic_emb_module
+    except ImportError:
+        get_dynamic_emb_module = None
 
 
 class _CacheDebugHook:
